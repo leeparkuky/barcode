@@ -8,8 +8,12 @@ from itertools import combinations, product
 from math import comb, sqrt
 from sympy import Symbol
 from tempfile import NamedTemporaryFile
-from csv import DictWriter
+from csv import DictWriter, writer
 import os
+
+import dask
+from dask.diagnostics import ProgressBar
+
 
 def symbol_prod(*args):
     output = args[0]*args[1]
@@ -52,6 +56,16 @@ class sample_generator:
         else:
             self.gen_main_effects()
         return self._main_effects_variabls
+    
+    @property
+    def main_effect_variables_str(self):
+        if hasattr(self,'_main_effects_variables'):
+            pass
+        else:
+            self.gen_main_effects()
+            self._main_effects_variables_str = [str(x) for x in self.main_effect_variables]
+        return self._main_effects_variables_str
+    
     
     def interaction_variables_generator(self):
         i = 1
@@ -107,29 +121,32 @@ class sample_generator:
             self._pi = self.rng.uniform(low = self.pi_range[0], high = self.pi_range[1], size = self.var_num)
         return {f'pi_{i+1}': v for i,v in enumerate(self._pi)}
     
-    def X_generator(self):
-        for _ in range(self.sample_size):
-            yield bernoulli.rvs(list(self.pi.values()), size = self.var_num)
-        
-
-    def get_y(self, x):
-        main_effect_variables = (str(x) for x in self.main_effect_variables)
-        main_effect_coefficients = self.main_coefficients
-        interaction_effect_coefficients = self.interaction_effect_coefficients
-        main_effect = sum([coef*variable for coef, variable in zip(main_effect_coefficients.values(), np.concatenate([[1], x]))])
-        
-        x_row = pd.Series(x, index = main_effect_variables)
-        interaction_effect = sum([x_row[str(key).split('*')].prod() * val for key, val in self.interaction_effect_coefficients.items()])
-        error = norm.rvs(scale = self.error_scale)
-        y = main_effect + interaction_effect + error
-        return y
     
+    def X_generator(self):
+        for row in zip(*[bernoulli.rvs(pi, size = self.sample_size) for pi in self.pi.values()]):
+            yield row
+
     def generator(self):
-        x_generator = self.X_generator()
-        variables = self.main_effect_variables + [Symbol('y')]
-        for array_x in x_generator:
-            y = self.get_y(array_x)
-            yield dict(zip(variables, array_x.tolist() + [y]))
+        X_generator = self.X_generator()
+        main_effect_variables = self.main_effect_variables_str
+        main_effect_coefficients = self.main_coefficients
+
+        def find_interaction_effect(row, interactions = self.interaction_effect_coefficients):
+            output = 0
+            for key, val in interactions.items():
+                key = str(key)
+                output += row[key.split('*')].prod() * val
+            return output
+
+
+        for x, error in zip(X_generator, norm.rvs(scale = self.error_scale, size = self.sample_size)):
+            main_variables = np.array([1]+list(x)); main_coefficients = np.array(list(self.main_coefficients.values()))
+            main_effect = main_variables.dot(main_coefficients)
+            x_row = pd.Series(x, index = main_effect_variables)
+            interaction_effect = find_interaction_effect(x_row)
+            y = main_effect + interaction_effect + error
+            yield list(x) + [y]
+
 
 
     @property
@@ -140,83 +157,67 @@ class sample_generator:
             self._fieldnames = self.main_effect_variables + [Symbol('y')]
         return self._fieldnames
     
-    
-    @property
-    def L(self):
-        if hasattr(self, '_L'):
-            pass
-        else:
-            def barcode_to_beta(barcode):
-                if isinstance(barcode, list):
-                    output = [1] + barcode
-                else:
-                    output = [1] + list(barcode)
-                N = len(output)
-                for i in range(2, N):
-                    output += [np.prod(x) for x in combinations(barcode, i)]
-            #     output += [np.prod(output)]
-                return output
-            all_sets = list(set(product([0,1], repeat = self.var_num))); all_sets.sort()
-            self._L = np.array([barcode_to_beta(x) for x in all_sets]).T
-        return self._L.T
-    
-    @property
-    def L_inv(self):
-        if hasattr(self, '_L_inv'):
-            pass
-        else:
-            self._L_inv = inv(self.L).astype(np.int8)
-        return self._L_inv
-    
-    def save_file(self):
-        with NamedTemporaryFile('w', suffix = '.csv', dir = os.getcwd(), delete = False) as csv_file:
-            filename = csv_file.name
-            generator = self.generator()
-            writer = DictWriter(csv_file, fieldnames = [str(x) for x in self.fieldnames])
-            writer.writeheader()
+def gen_small_file(**kwargs):
+    if 'filename' in kwargs.keys():
+        with open( kwargs['filename'], 'w') as csv_file:
+            del kwargs['filename']
+            generator = sample_generator(**kwargs)
+            csv_writer = writer(csv_file)
+            fieldnames = [str(x) for x in generator.fieldnames]
+            csv_writer.writerow(fieldnames)
             for row in generator:
-                row = {str(key):val for key, val in row.items()}
-                writer.writerow(row)
+                csv_writer.writerow(row)
         return filename
     
-    def __call__(self):
-        self.save_file()
+    else:
+        with NamedTemporaryFile('w',prefix = 'temp_', suffix = '.csv', dir = os.getcwd(), delete = False) as csv_file:
+            filename = csv_file.name
+            generator = sample_generator(**kwargs)
+            csv_writer = writer(csv_file)
+            fieldnames = [str(x) for x in generator.fieldnames]
+            csv_writer.writerow(fieldnames)
+            for row in generator:
+                csv_writer.writerow(row)
+        return filename
+    
+def gen_large_file(**kwargs):
+    num_cores = os.cpu_count()
+    batch_size = kwargs['sample_size'] // num_cores
+    remainder = kwargs['sample_size'] % num_cores
+    from joblib import Parallel, delayed
+    kwargs['sample_size'] = batch_size
+    filenames = Parallel(n_jobs=num_cores)(delayed(gen_small_file)(**kwargs) for _ in range(num_cores))
+    kwargs['sample_size'] = remainder
+    filenames.append(gen_small_file(**kwargs))
 
+    from dask import dataframe as dd
+    df = dd.read_csv("temp_*.csv")
+    df.to_parquet('sample_data.parquet', engine='pyarrow', write_index = False)
+
+    from glob import glob
+    for fname in glob('temp_*.csv'):
+        os.remove(fname)
+
+    return os.path.join(os.getcwd(), 'sample_data.parquet')
 
 
 
 def main(**kwargs):
-    if 'filename' in kwargs.keys():
-        with open( kwargs['filename'], 'w') as csv.file:
-            del kwargs['filename']
-            generator = sample_generator(**kwargs)
-            writer = DictWriter(csv_file, fieldnames = [str(x) for x in generator.fieldnames])
-            writer.writeheader()
-            for row in generator:
-                row = {str(key):val for key, val in row.items()}
-                writer.writerow(row)
-        return filename
-    
+    if kwargs['sample_size'] > 100:
+        gen_large_file(**kwargs)
     else:
-        with NamedTemporaryFile('w', suffix = '.csv', dir = os.getcwd(), delete = False) as csv_file:
-            filename = csv_file.name
-            generator = sample_generator(**kwargs)
-            writer = DictWriter(csv_file, fieldnames = [str(x) for x in generator.fieldnames])
-            writer.writeheader()
-            for row in generator:
-                row = {str(key):val for key, val in row.items()}
-                writer.writerow(row)
-        return filename
+        gen_small_file(**kwargs)
+    
 
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Creating a csv file for barcode study')
 
-    parser.add_argument('-f', '--file', type = str, required = False, default = None, help='Path to the input file')
+    parser.add_argument('-f', '--file', type = str, required = False, default = None, help='Path to the output file')
     parser.add_argument('-p', '--num_var', type=int, required = False, default = 3, help='A number of binary explanatory variables')
     parser.add_argument('-n','--sample_size', type = int, required = False, default = 100, help = 'Total number of rows of the dataset')
-    parser.add_argument('-e','--scale', required = False, default = None, help = "The scale parameter of the linear model" )
+    parser.add_argument('-e','--scale', required = False, default = None, type = float, help = "The scale parameter of the linear model" )
     
     # Parse the command-line arguments
     args = parser.parse_args()
@@ -228,7 +229,7 @@ if __name__ == '__main__':
     kwargs['var_num'] = args.num_var
     kwargs['sample_size'] = args.sample_size
     if args.scale:
-        kwargs['scale'] = args.scale
+        kwargs['error_scale'] = args.scale
 
     # run main function
     filename = main(**kwargs)
