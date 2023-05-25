@@ -2,6 +2,7 @@ from bitstring import Bits
 from dask import dataframe as dd
 from typing import List, Union
 import numpy as np
+import pandas as pd
 import scipy
 from scipy.sparse import diags, csc_matrix
 from itertools import product, combinations
@@ -10,8 +11,8 @@ import math
 
 
 class dask_parameter_generator():
-    def __init__(self, filename,  output_feature_name:str = None):
-        self.ddf = self.init_process_dataframe(filename, output_feature_name)
+    def __init__(self, dask_dataframe, output_feature_name = None):
+        self.ddf = self.init_process_dataframe(dask_dataframe, output_feature_name)
 
     @staticmethod
     def get_L(barcode_length):
@@ -31,6 +32,7 @@ class dask_parameter_generator():
         all_sets = list(set(product([0,1], repeat = barcode_length))); all_sets.sort()
         linear_function_L = np.array([barcode_to_beta(x) for x in all_sets]).T.astype(np.int8)
         linear_function_L = csc_matrix(linear_function_L)
+        del all_sets
         return linear_function_L
     
 
@@ -44,8 +46,8 @@ class dask_parameter_generator():
         else:
             raise ValueError("return type can be one of the followings: 'dask','pandas','numpy'")
 
-    def init_process_dataframe(self, filename, output_feature_name):
-        ddf = dd.read_csv(filename)
+    def init_process_dataframe(self, dask_dataframe, output_feature_name):
+        ddf = dask_dataframe
         if output_feature_name:
             input_features = ~ddf.columns.str.contains(output_feature_name)
         else:
