@@ -4,9 +4,20 @@ from typing import List, Union
 import numpy as np
 import pandas as pd
 import scipy
-from scipy.sparse import diags, csc_matrix
 from itertools import product, combinations
 import math
+
+#python default packages
+from dataclasses import dataclass
+from functools import partial
+#numpy and scipy
+from numpy.linalg import norm, inv
+from scipy.stats import f
+from scipy.sparse import diags, csr_matrix, csc_matrix
+from scipy.sparse.linalg import inv as sparse_inv
+
+
+
 
 
 
@@ -91,6 +102,8 @@ class dask_parameter_generator():
         else:
             self._full_segment_means = self.find_groupby_means()
         return self._full_segment_means
+
+
 
     def find_groupby_means(self):
         """
@@ -201,3 +214,20 @@ class dask_parameter_generator():
         sparse_diagonal_matrix= diags(raw_counts.reindex(list(range(self.num_full_var)), fill_value = 0))/self.MLE_VAR
         self._cell_means_fim = sparse_diagonal_matrix
         self._cell_means_covariance = diags(list(map(lambda x: 1/x if x else float('inf'), sparse_diagonal_matrix.diagonal())))
+
+
+    def contrast_generator(self):
+        from scipy.sparse import vstack
+        all_interaction_betas = scipy.sparse.eye(self.num_full_var - self.num_main_var -1, self.num_full_var, k = self.num_main_var + 1)
+        betas_in_test = product([False, True], repeat = self.num_full_var - self.num_main_var -1)
+        def get_new_contrasts(beta):
+            vstacks = []
+            for i, b in enumerate(beta):
+                if b:
+                    vstacks.append(all_interaction_betas.getrow(i))
+            return vstack(vstacks).astype(np.uint8)
+        
+        for beta in betas_in_test:
+            if sum(beta):
+                yield get_new_contrasts(beta)
+
