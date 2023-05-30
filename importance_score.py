@@ -6,6 +6,7 @@ import pandas as pd
 import scipy
 from itertools import product, combinations
 import math
+import os
 
 #python default packages
 from dataclasses import dataclass
@@ -16,14 +17,63 @@ from scipy.stats import f
 from scipy.sparse import diags, csr_matrix, csc_matrix
 from scipy.sparse.linalg import inv as sparse_inv
 
+from sympy import Symbol
 
 
+@dataclass
+class f_test_result:
+    nu_1:int
+    nu_2:int
+    f_statistic: float
+    
+    @property
+    def p_value(self):
+        if hasattr(self, '_p_value'):
+            pass
+        else:
+            sdf = f.sf(self.f_statistic, self.nu_1, self.nu_2, loc=0, scale=1)
+            self._p_value = sdf
+        return self._p_value
+    
+    @property
+    def cdf(self):
+        if hasattr(self, '_cdf'):
+            pass
+        else:
+            self._cdf = 1 - self.p_value
+        return self._cdf
 
 
 
 class dask_parameter_generator():
     def __init__(self, dask_dataframe, output_feature_name = None):
         self.ddf = self.init_process_dataframe(dask_dataframe, output_feature_name)
+
+    @property
+    def beta_names(self):
+        if hasattr(self, '_beta_names'):
+            pass
+        else:
+            beta_raw_index = [str(i) for i in range(1, self.num_main_var + 1)]
+            beta_names = ['beta_0'] + [f'beta_{i}' for i in beta_raw_index]
+            for r in range(2, self.num_main_var):
+                interaction_beta_index = (','.join(x) for x in combinations(beta_raw_index, r))
+                beta_names += [f'beta_{i}' for i in interaction_beta_index]
+            beta_names += [f"beta_{','.join(beta_raw_index)}"]
+            self._beta_names = beta_names
+            del beta_names
+            del beta_raw_index
+        return self._beta_names
+
+    @property
+    def beta_names_symbol(self):
+        if hasattr(self, '_beta_names_symbol'):
+            pass
+        else:
+            self._beta_names_symbol = [Symbol(x) for x in self.beta_names]
+        return self._beta_names_symbol
+
+
 
     @staticmethod
     def get_L(barcode_length):
@@ -57,7 +107,7 @@ class dask_parameter_generator():
         else:
             raise ValueError("return type can be one of the followings: 'dask','pandas','numpy'")
 
-    def init_process_dataframe(self, dask_dataframe, output_feature_name):
+    def init_process_dataframe(self, dask_dataframe, output_feature_name = None):
         ddf = dask_dataframe
         if output_feature_name:
             input_features = ~ddf.columns.str.contains(output_feature_name)
@@ -216,18 +266,81 @@ class dask_parameter_generator():
         self._cell_means_covariance = diags(list(map(lambda x: 1/x if x else float('inf'), sparse_diagonal_matrix.diagonal())))
 
 
-    def contrast_generator(self):
+    def contrast_generator(self, max_variables = None):
         from scipy.sparse import vstack
         all_interaction_betas = scipy.sparse.eye(self.num_full_var - self.num_main_var -1, self.num_full_var, k = self.num_main_var + 1)
         betas_in_test = product([False, True], repeat = self.num_full_var - self.num_main_var -1)
+        
         def get_new_contrasts(beta):
             vstacks = []
             for i, b in enumerate(beta):
                 if b:
                     vstacks.append(all_interaction_betas.getrow(i))
             return vstack(vstacks).astype(np.uint8)
-        
-        for beta in betas_in_test:
+        if max_variables is not None:
+            for beta in betas_in_test:
+                if sum(beta) and (sum(beta) <= max_variables):
+                    yield get_new_contrasts(beta)
+        else:
             if sum(beta):
                 yield get_new_contrasts(beta)
+
+
+    @property
+    def L_inv(self):
+        if hasattr(self, '_L_inv'):
+            pass
+        else:
+            L_inv = sparse_inv(self.L)
+            self._L_inv = L_inv.astype(np.int8)
+        return self._L_inv
+
+    @staticmethod    
+    def partial_f_test(contrast, L_inv, cell_means, cell_means_covariance, sample_size):
+        assert contrast.shape[0] < contrast.shape[1]
+        assert contrast.shape[1] == L_inv.shape[0]
+        assert L_inv.shape[0] == L_inv.shape[1]
+        assert cell_means_covariance.shape == L_inv.shape
+        nu_1 = contrast.shape[0]
+        nu_2 = sample_size - L_inv.shape[0]
+        contrast = contrast.toarray()
+
+        LC = contrast @ L_inv.T
+        mu = LC @ cell_means
+        var = LC @ cell_means_covariance @ LC.T
+        f_value = mu.T @ inv(var) @ mu
+        f_value /= nu_1
+        
+        return f_test_result(nu_1, nu_2, f_value)
+    
+
+
+    def gen_importance_score(self, filename = 'importance_score.csv', dir = os.getcwd(), max_variables = None):
+        cell_means = self.find_groupby_means().compute().y.to_numpy()
+        kwargs = {"L_inv": self.L_inv, "cell_means": cell_means, "cell_means_covariance": self.cell_means_covariance, "sample_size": self.sample_size}
+
+        from csv import writer
+        from tqdm import tqdm
+        with open(os.path.join(dir, filename), 'w') as f:
+            csv_writer = writer(f)
+            csv_writer.writerow(self.beta_names + ['score'])
+            contrasts =  self.contrast_generator(max_variables = max_variables)
+            from math import comb
+            if max_variables:
+                total_iter = sum([comb(self.num_full_var - self.num_main_var -1, x) for x in range(1, max_variables +1)])
+            else:
+                total_iter = sum([comb(self.num_full_var - self.num_main_var -1, x) for x in range(1,self.num_full_var - self.num_main_var)])
+            for contrast in tqdm(contrasts, total = total_iter):
+                result = self.partial_f_test(contrast = contrast, **kwargs)
+                score = result.cdf
+                row = contrast.sum(axis = 0).tolist()[0] + [score]
+                csv_writer.writerow(row)
+
+
+        
+
+
+    
+            
+
 

@@ -37,6 +37,9 @@ class sample_generator:
     def __iter__(self):
         return self.generator()
     
+
+
+
     def gen_main_effects(self):
         self._main_effects_variabls = [Symbol(f'x_{i+1}') for i in range(self.var_num)]
         self._main_beta = [Symbol(f'beta_{i+1}') for i in range(self.var_num)]
@@ -129,7 +132,6 @@ class sample_generator:
     def generator(self):
         X_generator = self.X_generator()
         main_effect_variables = self.main_effect_variables_str
-        main_effect_coefficients = self.main_coefficients
 
         def find_interaction_effect(row, interactions = self.interaction_effect_coefficients):
             output = 0
@@ -157,6 +159,35 @@ class sample_generator:
             self._fieldnames = self.main_effect_variables + [Symbol('y')]
         return self._fieldnames
     
+
+    def save_config(self, filename = 'sample_generator_config.pickle', dir = os.getcwd()):
+        import pickle
+        with open(os.path.join(dir, filename), 'wb') as f:
+            pickle.dump(self.config, f)
+    
+    @property
+    def config(self):
+        if hasattr(self,'_config'):
+            pass
+        else:
+            self.interaction_effect_coefficients
+            self.main_coefficients
+            config_variables = ['var_num','sample_size','num_interactions','error_scale','_main_ffects_variables','_main_beta','interactions_coef',
+                                'beta_effective','_interactions','_main_coefficients']
+            self._config = {k:v for k,v in self.__dict__.items() if k in config_variables}
+        return self._config
+    
+    @classmethod
+    def from_config(cls, config):
+        original_variables = ['var_num','sample_size','num_interactions','error_scale']
+        original_kwargs = {k:v for k,v in config.items() if k in original_variables}
+        sg = cls(**original_kwargs)
+        for key, val in config.items():
+            if key not in original_variables:
+                sg.__dict__[key] = val
+        return sg
+
+    
 def gen_small_file(**kwargs):
     if 'filename' in kwargs.keys():
         with open( kwargs['filename'], 'w') as csv_file:
@@ -180,15 +211,49 @@ def gen_small_file(**kwargs):
                 csv_writer.writerow(row)
         return filename
     
+
+def gen_small_file_with_config(config, **kwargs):
+    if 'filename' in kwargs.keys():
+        with open( kwargs['filename'], 'w') as csv_file:
+            del kwargs['filename']
+            generator = sample_generator.from_config(config)
+            csv_writer = writer(csv_file)
+            fieldnames = [str(x) for x in generator.fieldnames]
+            csv_writer.writerow(fieldnames)
+            for row in generator:
+                csv_writer.writerow(row)
+        return filename
+    
+    else:
+        with NamedTemporaryFile('w',prefix = 'temp_', suffix = '.csv', dir = os.getcwd(), delete = False) as csv_file:
+            filename = csv_file.name
+            generator = sample_generator.from_config(config)
+            csv_writer = writer(csv_file)
+            fieldnames = [str(x) for x in generator.fieldnames]
+            csv_writer.writerow(fieldnames)
+            for row in generator:
+                csv_writer.writerow(row)
+        return filename
+
+
+    
 def gen_large_file(**kwargs):
+    kwargs_copy = kwargs.copy()
+    if 'filename' in kwargs.keys():
+        del kwargs_copy['filename']
+    main_sampler = sample_generator(**kwargs_copy)
+    config = main_sampler.config # same coefficients and interaction effects will be used across sample generator
+    main_sampler.save_config() # save config file
     num_cores = os.cpu_count()
     batch_size = kwargs['sample_size'] // num_cores
     remainder = kwargs['sample_size'] % num_cores
     from joblib import Parallel, delayed
-    kwargs['sample_size'] = batch_size
-    filenames = Parallel(n_jobs=num_cores)(delayed(gen_small_file)(**kwargs) for _ in range(num_cores))
-    kwargs['sample_size'] = remainder
-    filenames.append(gen_small_file(**kwargs))
+    config['sample_size'] = batch_size
+
+    filenames = Parallel(n_jobs=num_cores)(delayed(gen_small_file_with_config)(config, **kwargs) for _ in range(num_cores))
+    if remainder:
+        config['sample_size'] = remainder
+        filenames.append(gen_small_file_with_config(config, **kwargs))
 
     from dask import dataframe as dd
     df = dd.read_csv("temp_*.csv")
