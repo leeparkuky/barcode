@@ -119,6 +119,9 @@ class dask_parameter_generator():
         self.L = self.get_L(self.num_main_var)
 
         dtype = self.find_integer_type(input_features)
+        for input_name in ddf.columns[input_features].tolist():
+            ddf[input_name] = ddf[input_name].astype(np.int8)
+        self.original_ddf = ddf.copy()
         ddf['barcode'] = ddf.loc[:, input_features].apply(self.return_bitstring, axis = 1, meta=(None, dtype))
         ddf = ddf.loc[:, ~np.concatenate([input_features, [False]])]
         ddf = ddf.set_index('barcode')
@@ -282,8 +285,9 @@ class dask_parameter_generator():
                 if sum(beta) and (sum(beta) <= max_variables):
                     yield get_new_contrasts(beta)
         else:
-            if sum(beta):
-                yield get_new_contrasts(beta)
+            for beta in betas_in_test:
+                if sum(beta):
+                    yield get_new_contrasts(beta)
 
 
     @property
@@ -330,11 +334,39 @@ class dask_parameter_generator():
                 total_iter = sum([comb(self.num_full_var - self.num_main_var -1, x) for x in range(1, max_variables +1)])
             else:
                 total_iter = sum([comb(self.num_full_var - self.num_main_var -1, x) for x in range(1,self.num_full_var - self.num_main_var)])
-            for contrast in tqdm(contrasts, total = total_iter):
-                result = self.partial_f_test(contrast = contrast, **kwargs)
-                score = result.cdf
-                row = contrast.sum(axis = 0).tolist()[0] + [score]
-                csv_writer.writerow(row)
+            if total_iter < os.cpu_count() * 10:
+                for contrast in tqdm(contrasts, total = total_iter):
+                    result = self.partial_f_test(contrast = contrast, **kwargs)
+                    score = result.cdf
+                    row = contrast.sum(axis = 0).tolist()[0] + [score]
+                    csv_writer.writerow(row)
+            else:
+                from joblib import Parallel, delayed
+                num_cores = os.cpu_count()
+                batch_size = 1000 * num_cores
+                partition_size = 1000
+                contrast_batch = []
+                for i, contrast in tqdm(enumerate(contrasts), total = total_iter):
+                    contrast_batch.append(contrast)
+                    if len(contrast_batch) % batch_size == 0:
+                        f_test_results = Parallel(n_jobs=num_cores)(delayed(self.partial_f_test)(c, **kwargs) for c in contrast_batch)
+                        f_test_results = [x.cdf for x in f_test_results]
+                        rows = [c.sum(axis = 0).tolist()[0] + [f] for c,f in zip(contrast_batch, f_test_results)]
+                        csv_writer.writerows(rows)
+                        del contrast_batch
+                        del rows
+                        del f_test_results
+                        contrast_batch = []
+                # process the remainder
+                if len(contrast_batch):
+                    f_test_results = Parallel(n_jobs=num_cores)(delayed(self.partial_f_test)(c, **kwargs) for c in contrast_batch)
+                    f_test_results = [x.cdf for x in f_test_results]
+                    rows = [c.sum(axis = 0).tolist()[0] + [f] for c,f in zip(contrast_batch, f_test_results)]
+                    csv_writer.writerows(rows)
+                    
+
+
+
 
 
         

@@ -6,3 +6,4 @@ scikit-learn
 Jinja2
 bitstring
 dask
+tqdm
