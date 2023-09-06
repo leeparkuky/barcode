@@ -7,6 +7,124 @@ from functools import partial
 from itertools import combinations, product
 from math import comb, sqrt
 
+
+class base_barcode:
+    def __init__(self, X, y):
+        self.X = X
+        self.clean_X()
+        self.y = y
+        self.clean_y()
+
+    def clean_X(self):
+        if isinstance(self.X, np.ndarray):
+            self.X = pd.DataFrame(self.X, columns = [f"x_{i}" for i in range(self.X.shape[1])])
+            self.original_columns = self.X.columns.tolist()
+        elif isinstance(self.X, pd.DataFrame):
+            self.original_columns = self.X.columns.tolist()
+        self.p = self.X.shape[1]
+
+    def clean_y(self):
+        if isinstance(self.y, np.ndarray):
+            if self.y.shape[1]:
+                pass
+            else:
+                self.y = self.y.reshape(-1, 1)
+        elif isinstance(self.y, pd.DataFrame):
+            self.y = self.y.iloc[:, 0].to_numpy().reshape(-1,1)
+        elif isinstance(self.y, pd.Series):
+            self.y = self.y.to_numpy().reshape(-1,1)
+
+            
+    @property
+    def beta_names(self):
+        if hasattr(self, '_beta_names'):
+            pass
+        else:
+            beta_raw_names = [f'beta{i}' for i in range(1, self.p + 1)]
+            beta_names = [f'beta{i}' for i in range(self.p + 1)]
+            for r in range(2, self.p):
+                beta_names += ['*'.join(x) for x in combinations(beta_raw_names, r)]
+            beta_names += ['*'.join(beta_raw_names)]
+            self._beta_names = beta_names
+            del beta_names
+            del beta_raw_names
+        return self._beta_names
+
+    @property
+    def barcode(self):
+        if hasattr(self, '_barcode'):
+            pass
+        else:
+            self._barcode = self.gen_barcode(self.X)
+        return self._barcode
+    
+    @staticmethod
+    def gen_barcode(X):
+        pack_bits = np.packbits(np.array(X), axis = -1)
+        if pack_bits.shape[1]>1:
+            def gen_barcode(a, k, return_float = False):
+                m = len(a)-1
+                total_sum = 0
+                for i, x in enumerate(a):
+                    if i < m:
+                        if return_float:
+                            adjust = (x * 2**(m-i-1) * 2**k)
+                            total_sum += float(adjust)
+                        else:
+                            total_sum += (x * 2**(m-i-1) << k)
+                    else:
+                        total_sum += (x >> (8-k))
+                return total_sum
+            if X.shape[1] > 500:
+                barcode = partial(gen_barcode, k = X.shape[1]%8, return_float = True)
+            else:
+                barcode = partial(gen_barcode, k = X.shape[1]%8)
+        else:
+            def adjust_barcode(a, k):
+                a = a >> k
+                return a
+            barcode = partial(adjust_barcode, k = 8-X.shape[1])
+        output = np.apply_along_axis(barcode, 1, pack_bits)
+        return output
+    
+    
+    @staticmethod
+    def barcode_to_beta(barcode):
+        if isinstance(barcode, list):
+            output = [1] + barcode
+        else:
+            output = [1] + list(barcode)
+        N = len(output)
+        for i in range(2, N):
+            output += [np.prod(x) for x in combinations(barcode, i)]
+    #     output += [np.prod(output)]
+        return output
+    
+    @property
+    def L(self):
+        if hasattr(self, '_L'):
+            pass
+        else:
+            all_sets = list(set(product([0,1], repeat = self.p))); all_sets.sort()
+            self._L = np.array([self.barcode_to_beta(x) for x in all_sets]).astype(np.int8)
+        return self._L
+    
+    @property
+    def L_inv(self):
+        if hasattr(self, '_L_inv'):
+            pass
+        else:
+            L = self.L
+            self._L_inv = np.linalg.inv(self.L).astype(np.int8)
+        return self._L_inv
+
+
+
+
+
+
+
+
 @dataclass
 class sample_generator:
     p: int
