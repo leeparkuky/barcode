@@ -15,6 +15,11 @@ import estimators
 #joblib
 from joblib import Parallel, delayed
 
+# itertools
+from itertools import combinations
+
+# types
+from typing import Union
 
 
 @dataclass
@@ -317,3 +322,389 @@ class cluster_barcode_scanner:
                     c_base_index = beta_idx
             contrasts = np.concatenate(contrasts, axis = 0)
             return contrasts
+        
+
+
+class base_barcode:
+    def __init__(self, X, y):
+        self.X = X
+        self.clean_X()
+        self.y = y
+        self.clean_y()
+
+    def clean_X(self):
+        if isinstance(self.X, np.ndarray):
+            self.X = pd.DataFrame(self.X, columns = [f"x_{i}" for i in range(self.X.shape[1])])
+            self.original_columns = self.X.columns.tolist()
+        elif isinstance(self.X, pd.DataFrame):
+            self.original_columns = self.X.columns.tolist()
+        self.p = self.X.shape[1]
+
+    def clean_y(self):
+        if isinstance(self.y, np.ndarray):
+            if self.y.shape[1]:
+                pass
+            else:
+                self.y = self.y.reshape(-1, 1)
+        elif isinstance(self.y, pd.DataFrame):
+            self.y = self.y.iloc[:, 0].to_numpy().reshape(-1,1)
+        elif isinstance(self.y, pd.Series):
+            self.y = self.y.to_numpy().reshape(-1,1)
+
+            
+    @property
+    def beta_names(self):
+        if hasattr(self, '_beta_names'):
+            pass
+        else:
+            beta_raw_names = [f'beta{i}' for i in range(1, self.p + 1)]
+            beta_names = [f'beta{i}' for i in range(self.p + 1)]
+            for r in range(2, self.p):
+                beta_names += ['*'.join(x) for x in combinations(beta_raw_names, r)]
+            beta_names += ['*'.join(beta_raw_names)]
+            self._beta_names = beta_names
+            del beta_names
+            del beta_raw_names
+        return self._beta_names
+
+    @property
+    def barcode(self):
+        if hasattr(self, '_barcode'):
+            pass
+        else:
+            self._barcode = self.gen_barcode(self.X)
+        return self._barcode
+    
+    @staticmethod
+    def gen_barcode(X):
+        pack_bits = np.packbits(np.array(X), axis = -1)
+        if pack_bits.shape[1]>1:
+            def gen_barcode(a, k, return_float = False):
+                m = len(a)-1
+                total_sum = 0
+                for i, x in enumerate(a):
+                    if i < m:
+                        if return_float:
+                            adjust = (x * 2**(m-i-1) * 2**k)
+                            total_sum += float(adjust)
+                        else:
+                            total_sum += (x * 2**(m-i-1) << k)
+                    else:
+                        total_sum += (x >> (8-k))
+                return total_sum
+            if X.shape[1] > 500:
+                barcode = partial(gen_barcode, k = X.shape[1]%8, return_float = True)
+            else:
+                barcode = partial(gen_barcode, k = X.shape[1]%8)
+        else:
+            def adjust_barcode(a, k):
+                a = a >> k
+                return a
+            barcode = partial(adjust_barcode, k = 8-X.shape[1])
+        output = np.apply_along_axis(barcode, 1, pack_bits)
+        return output
+    
+    
+    @staticmethod
+    def barcode_to_beta(barcode):
+        if isinstance(barcode, list):
+            output = [1] + barcode
+        elif isinstance(barcode, Union[int, float]):
+            barcode = int(barcode)
+            barcode = bin(barcode)[2:]
+            output = [1] + [int(x) for x in list(barcode)]
+            barcode = output.copy()
+        else:
+            output = [1] + list(barcode)
+        N = len(output)
+        for i in range(2, N):
+            output += [np.prod(x) for x in combinations(barcode, i)]
+    #     output += [np.prod(output)]
+        return output
+    
+    @property
+    def all_combinations(self):
+        if hasattr(self, '_all_combinations'):
+            pass
+        else:
+            all_sets = list(set(product([0,1], repeat = self.p))); all_sets.sort()
+            all_comb = pd.DataFrame(np.array([list(x) for x in all_sets]), columns = self.original_columns)
+            self._all_combinations = all_comb
+        return self._all_combinations
+
+
+    @property
+    def L(self):
+        if hasattr(self, '_L'):
+            pass
+        else:
+            all_sets = list(set(product([0,1], repeat = self.p))); all_sets.sort()
+            self._L = np.array([self.barcode_to_beta(x) for x in all_sets]).astype(np.int8)
+        return self._L
+    
+    @property
+    def L_inv(self):
+        if hasattr(self, '_L_inv'):
+            pass
+        else:
+            L = self.L
+            self._L_inv = np.linalg.inv(self.L).round(0).astype(np.int8)
+        return self._L_inv
+    
+
+class tree_and_clustering(base_barcode):
+    def __init__(self, X, y, tree_model):
+        super().__init__(X, y)
+        self.clean_data()
+        self.estimator = tree_model
+        self.fit()
+
+    def clean_data(self):
+        full_df = self.X.copy()
+        full_df['y'] = self.y.reshape(-1)
+        sorted_index = full_df.sort_values(full_df.columns.tolist()[:-1]).index.tolist()
+        self.full_df = full_df.loc[sorted_index, :].reset_index(drop = True)
+        self.barcode_df = pd.DataFrame(zip(self.barcode.reshape(-1), self.y.reshape(-1)), columns = ['z','y']).loc[sorted_index, :].reset_index(drop = True)
+        self.X = full_df.iloc[:, :-1]
+        self.y = full_df.y.to_numpy().reshape(-1,1)
+        del sorted_index
+        del full_df
+        
+    def fit(self):   
+        X_train = self.X.copy()
+        y_train = self.y.copy()     
+        self.estimator.fit(X_train, y_train.reshape(-1))
+        self._fit = True
+
+    def predict_from_training(self):
+        if hasattr(self, '_fit'):
+            if self._fit:
+                pass
+            else:
+                self.fit()
+        else:
+            self.fit()
+        full_df = self.full_df.copy()
+        full_df['y_hat'] = self.estimator.predict(full_df.loc[:, self.original_columns])
+        full_df['sq'] = (full_df.y_hat - full_df.y)**2
+        summary = full_df.groupby(self.original_columns).agg({"y_hat": np.mean, "sq": [lambda x: x.sum()/x.count(), 'count']}).reset_index()
+        summary.columns = self.original_columns + ['group_means','mse','count']
+        return summary
+    
+    @property
+    def summary_table(self):
+        if hasattr(self, "_summary_table"):
+            pass
+        else:
+            self._summary_table = self.predict_from_training()
+        return self._summary_table
+    
+    @property
+    def init_mu_hat(self):
+        if hasattr(self, "_init_mu_hat"):
+            pass
+        else:
+            self._init_mu_hat = self.summary_table.group_means.tolist()
+            self._init_mu_hat = np.array(self._init_mu_hat).reshape(-1)
+        return self._init_mu_hat
+    
+    @property
+    def init_mu_var(self):
+        if hasattr(self, "_init_mu_var"):
+            pass
+        else:
+            self._init_mu_var = np.diag(self.summary_table.mse/self.summary_table['count'])
+        return self._init_mu_var
+    
+    @property
+    def init_beta_hat(self):
+        if hasattr(self, "_init_beta_hat"):
+            pass
+        else:
+            self._init_beta_hat = self.L_inv @ self.init_mu_hat
+        return self._init_beta_hat
+
+    @property
+    def init_beta_var(self):
+        if hasattr(self, "_init_beta_var"):
+            pass
+        else:
+            self._init_beta_var = self.L_inv @ self.init_mu_var @ self.L_inv.T
+        return self._init_beta_var
+
+    @property
+    def clustering_init_kwargs(self):
+        summary = self.summary_table
+        kwargs = {"means": summary.group_means.tolist(), "variances": summary.mse.tolist(), "sample_sizes": summary['count'].tolist()}
+        return kwargs
+    
+    @property
+    def init_cluster_idx(self):
+        if hasattr(self, "_init_cluster_idx"):
+            pass
+        else:
+            sample_sizes = self.clustering_init_kwargs['sample_sizes']
+            clusters = []
+            last = 0
+            for n in sample_sizes:
+                clusters.append([x for x in range(last, n+last)])
+                last += n
+            self._init_cluster_idx = clusters
+        return self._init_cluster_idx
+
+    @property
+    def init_pdist(self):
+        if hasattr(self, "_init_pdist"):
+            pass
+        else:
+            self._init_pdist = self.pairwise_distances_from_means_variances(**self.clustering_init_kwargs)
+        return self._init_pdist
+
+    def cluster(self, n_clusters, save = True):
+        self.last_n_clusters = n_clusters
+        pdist = self.init_pdist.copy()
+        init_cluster_idx = self.init_cluster_idx.copy()
+        result = self.agglomerative_clustering(pairwise_distances = pdist, n_clusters = n_clusters, clusters = init_cluster_idx)
+        cluster_idx = result[0]
+        final_pdist = result[1]
+        cluster_df = {}
+        for cluster_id, cluster_index in enumerate(cluster_idx):
+            cluster_id_name = f"cluster_{cluster_id}"
+            cluster_df[cluster_id_name] = self.full_df.loc[cluster_index,:].copy()
+            cluster_df[cluster_id_name] = cluster_df[cluster_id_name].groupby(self.original_columns).agg(np.mean).reset_index()
+            cluster_df[cluster_id_name]['barcode'] = self.gen_barcode((cluster_df[cluster_id_name].loc[:, self.original_columns]))
+        if save:
+            self._latest_cluster_dfs = cluster_df
+        else:
+            self._latest_cluster_dfs = None
+        
+        return {"cluster": cluster_df, "final_pdist": final_pdist}
+
+    def gen_mu_contrast_from_cluster(self, n_clusters, use_latest_cluster_df = True):
+        if use_latest_cluster_df:
+            if hasattr(self, '_latest_cluster_dfs'):
+                if (self._latest_cluster_dfs != None) & (self.last_n_clusters == n_clusters):
+                    cluster_df_list = self._latest_cluster_dfs
+        try:
+            cluster_df_list
+        except:
+            cluster_result = self.cluster(n_clusters = n_clusters)
+            cluster_df_list = cluster_result['cluster']
+            
+        contrast_matrix = 0
+        for cluster_name, cluster_df in cluster_df_list.items():
+            if cluster_df.shape[0] > 1:
+                contrast = np.zeros((cluster_df.shape[0]-1, 2**len(self.original_columns)))
+                for i, row in enumerate(contrast):
+                    row[cluster_df.barcode[0]] = 1
+                    row[cluster_df.barcode[i+1]] = -1
+                    contrast[i] = row
+                if isinstance(contrast_matrix, np.ndarray):
+                    contrast_matrix = np.concatenate([contrast_matrix, contrast], axis = 0)
+                else:
+                    contrast_matrix = contrast
+            else:
+                pass
+        return contrast_matrix
+    
+    def gen_projection_matrix_mu(self, n_clusters):
+        C = self.gen_mu_contrast_from_cluster(n_clusters)
+        projection_matrix = C.T @ np.linalg.inv(C @ C.T) @ C
+        projection_matrix = np.identity(C.shape[1]) - projection_matrix
+        return projection_matrix
+    
+    
+    def get_projected_beta_hat(self, n_clusters):
+        mu = self.init_mu_hat
+        proj_mu = self.gen_projection_matrix_mu(n_clusters = n_clusters) @ mu
+        proj_beta = self.L_inv @ proj_mu
+        return proj_beta
+    
+    def get_projected_beta_hat_var(self, n_clusters):
+        mu_var = self.init_mu_var
+        proj = self.gen_projection_matrix_mu(n_clusters = n_clusters)
+        return self.L_inv @ proj @ mu_var @ proj.T @ self.L_inv.T
+
+    
+    def ward_linkage(self, pairwise_distances, clusters, merge_indices):
+        clusters = clusters.copy()
+        i, j = merge_indices
+        cluster_i = clusters[i]
+        cluster_j = clusters[j]
+        n_i = len(cluster_i)
+        n_j = len(cluster_j)
+        n = pairwise_distances.shape[1]
+        new_distances = pairwise_distances.copy()
+        new_distances = np.delete(new_distances, merge_indices, axis = 0)
+        new_distances = np.delete(new_distances, merge_indices, axis = 1)
+        new_distances = np.append(new_distances, np.zeros((1, new_distances.shape[1])), axis = 0)
+        new_distances = np.append(new_distances,  np.zeros((new_distances.shape[0], 1)), axis = 1)
+        clusters.append(cluster_i + cluster_j)
+        clusters.remove(cluster_i)
+        clusters.remove(cluster_j)
+        col = 0
+        
+        for k in range(n):  # Subtract 2 because we've already added a row and column
+            if k != i and k != j:
+                n_k = len(clusters[col])
+                n_all = n_i + n_j + n_k
+                dist_ik = pairwise_distances[i, k]*(n_k + n_i)/n_all
+                dist_jk = pairwise_distances[j, k]*(n_j + n_k)/n_all
+                dist_ij = pairwise_distances[i, j]*(n_k)/n_all
+                new_dist = dist_ik + dist_jk - dist_ij
+                # Add other linkage methods here if needed
+                
+                new_distances[-1, col] = new_dist
+                new_distances[col, -1] = new_dist
+                col += 1
+
+        return new_distances, clusters
+
+    def agglomerative_clustering(self, pairwise_distances, n_clusters, clusters = None, estimator = None):
+        n = pairwise_distances.shape[0]
+        if clusters:
+            pass
+        else:
+            clusters = [[i] for i in range(n)]
+        
+        assert len(clusters) == n
+        
+        for k in range(n - n_clusters):
+            min_dist = np.inf
+            merge_indices = None
+            
+            for i in range(len(clusters)):
+                for j in range(i + 1, len(clusters)):
+                    dist = pairwise_distances[i, j]
+                    if dist < min_dist:
+                        min_dist = dist
+                        merge_indices = (i, j)
+            
+            if merge_indices:
+                pairwise_distances, clusters = self.ward_linkage(pairwise_distances, clusters, merge_indices)
+        
+        return clusters, pairwise_distances
+
+    
+    
+    def pairwise_distances_from_means_variances(self, means, variances, sample_sizes):
+        num_clusters = len(means)
+        pairwise_distances = np.zeros((num_clusters, num_clusters))
+        
+        for i in range(num_clusters):
+            for j in range(i + 1, num_clusters):
+                n_i = sample_sizes[i]
+                n_j = sample_sizes[j]
+                mean_i = means[i]
+                mean_j = means[j]
+                var_i = variances[i]
+                var_j = variances[j]
+                
+                # Calculate the pairwise distance using Ward linkage formula
+                numerator = (n_i * n_j / (n_i + n_j)) * (mean_i - mean_j)**2
+                denominator = np.sqrt((n_i * var_i + n_j * var_j) / (n_i + n_j))
+                
+                pairwise_distances[i, j] = np.sqrt(numerator / denominator)
+                pairwise_distances[j, i] = pairwise_distances[i, j]
+        
+        return pairwise_distances
