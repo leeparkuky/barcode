@@ -112,12 +112,12 @@ class test_result():
         
 @dataclass
 class tau:
-    n: int
-    p: int
-    q: int
-    r_sqf: float
-    r_sqr: float
-    alpha: float = 0.05
+    n: int # sample size
+    p: int # dimension of the full model
+    q: int # dimension of the reduced model
+    r_sqf: float # r2_score of the full model
+    r_sqr: float # r2_score of the reduced model
+    alpha: float = 0.05 # level of significance
         
     @property
     def tau_est(self):

@@ -452,6 +452,13 @@ class base_barcode:
         return self._L_inv
     
 
+
+
+
+
+
+
+
 class tree_and_clustering(base_barcode):
     def __init__(self, X, y, tree_model):
         super().__init__(X, y)
@@ -708,3 +715,118 @@ class tree_and_clustering(base_barcode):
                 pairwise_distances[j, i] = pairwise_distances[i, j]
         
         return pairwise_distances
+
+
+@dataclass
+class summary:
+    summary: pd.DataFrame
+    mu_hat: np.ndarray
+    mu_var: np.ndarray
+    beta_hat: np.ndarray
+    beta_var: np.ndarray
+    pdist_kwargs: dict
+    pdist: np.ndarray
+    init_cluster_idx: list
+
+class rf_and_clustering(tree_and_clustering):
+    def __init__(self, X, y, random_forest_model):
+        super().__init__(X, y, tree_model = random_forest_model)
+        self.estimators = self.estimator.estimators_
+
+    def _gen_summary(self, estimator):
+        full_df = self.full_df.copy()
+        full_df['y_hat'] = estimator.predict(full_df.loc[:, self.original_columns].to_numpy())
+        full_df['sq'] = (full_df.y_hat - full_df.y)**2
+        summary = full_df.groupby(self.original_columns).agg({"y_hat": np.mean, "sq": [lambda x: x.sum()/x.count(), 'count']}).reset_index()
+        summary.columns = self.original_columns + ['group_means','mse','count']
+        return summary
+    
+    def _gen_cluster_idx(self, sample_sizes_by_cluster):
+        clusters = []
+        last = 0
+        for n in sample_sizes_by_cluster:
+            clusters.append([x for x in range(last, n+last)])
+            last += n
+        return clusters
+    
+    def _single_clustering(self, n_clusters, pdist, init_custer_idx):
+        result = self.agglomerative_clustering(pairwise_distances = pdist, n_clusters = n_clusters, clusters = init_cluster_idx)
+        cluster_idx = result[0]
+        final_pdist = result[1]
+        cluster_df = {}
+        for cluster_id, cluster_index in enumerate(cluster_idx):
+            cluster_id_name = f"cluster_{cluster_id}"
+            cluster_df[cluster_id_name] = self.full_df.loc[cluster_index,:].copy()
+            cluster_df[cluster_id_name] = cluster_df[cluster_id_name].groupby(self.original_columns).agg(np.mean).reset_index()
+            cluster_df[cluster_id_name]['barcode'] = self.gen_barcode((cluster_df[cluster_id_name].loc[:, self.original_columns]))
+        return {"cluster": cluster_df, "final_pdist": final_pdist}
+
+    def _gen_statistics(self, estimator):
+        summary_table = self._gen_summary(estimator)
+        mu_hat = summary_table.group_means.to_numpy().reshape(-1)
+        mu_var = np.diag(summary_table.mse/summary_table['count'])
+        beta_hat = self.L_inv @ mu_hat
+        beta_var = self.L_inv @ mu_var @ self.L_inv.T
+        pdist_kwargs = {"means": summary_table.group_means.tolist(),
+                         "variances": summary_table.mse.tolist(), 
+                         "sample_sizes": summary_table['count'].tolist()}
+        pdist = self.pairwise_distances_from_means_variances(**pdist_kwargs)
+        init_cluster_idx = self._gen_cluster_idx(pdist_kwargs['sample_sizes'])
+        estimator_summary = summary(summary_table, mu_hat, mu_var, beta_hat, beta_var, pdist_kwargs, pdist, init_cluster_idx)
+        return estimator_summary
+
+    def _cluster_estimator(self, estimator_summary, n_clusters):
+        pdist = estimator_summary.pdist
+        init_cluster_idx = estimator_summary.init_cluster_idx
+        result = self.agglomerative_clustering(pairwise_distances = pdist, n_clusters = n_clusters, clusters = init_cluster_idx)
+        cluster_idx = result[0]
+        final_pdist = result[1]
+        cluster_df = {}
+        for cluster_id, cluster_index in enumerate(cluster_idx):
+            cluster_id_name = f"cluster_{cluster_id}"
+            cluster_df[cluster_id_name] = self.full_df.loc[cluster_index,:].copy()
+            cluster_df[cluster_id_name] = cluster_df[cluster_id_name].groupby(self.original_columns).agg(np.mean).reset_index()
+            cluster_df[cluster_id_name]['barcode'] = self.gen_barcode((cluster_df[cluster_id_name].loc[:, self.original_columns]))
+        return {"cluster": cluster_df, "final_pdist": final_pdist}
+    
+    def _gen_contrast_matrix(self, cluster_df_list):
+        contrast_matrix = 0
+        for cluster_name, cluster_df in cluster_df_list.items():
+            if cluster_df.shape[0] > 1:
+                contrast = np.zeros((cluster_df.shape[0]-1, 2**len(self.original_columns)))
+                for i, row in enumerate(contrast):
+                    row[cluster_df.barcode[0]] = 1
+                    row[cluster_df.barcode[i+1]] = -1
+                    contrast[i] = row
+                if isinstance(contrast_matrix, np.ndarray):
+                    contrast_matrix = np.concatenate([contrast_matrix, contrast], axis = 0)
+                else:
+                    contrast_matrix = contrast
+            else:
+                pass
+        return contrast_matrix
+
+    def _gen_mu_contrast_from_cluster(self, estimator_summary, n_clusters):
+        cluster_result = self._cluster_estimator(estimator_summary = estimator_summary, n_clusters = n_clusters)
+        cluster_df_list = cluster_result['cluster']
+        contrast_matrix = self._gen_contrast_matrix(cluster_df_list = cluster_df_list)
+        return contrast_matrix
+    
+    def projected_beta_for_single_estimator(self, estimator, n_clusters):
+        estimator_summary = self._gen_statistics(estimator = estimator)
+        C_mu = self._gen_mu_contrast_from_cluster(estimator_summary = estimator_summary, n_clusters = n_clusters)
+        projection_matrix = C_mu.T @ np.linalg.inv(C_mu @ C_mu.T) @ C_mu
+        projection_matrix = np.identity(C_mu.shape[1]) - projection_matrix
+        init_mu = estimator_summary.mu_hat.reshape(-1)
+        mu_hat = projection_matrix @ init_mu
+        beta_hat = self.L_inv @ mu_hat
+        return beta_hat
+    
+    
+    def importance_mean(self, n_clusters):
+        beta_hat_arrays = [self.projected_beta_for_single_estimator(e, n_clusters).reshape(1, -1) for e in self.estimator.estimators_]
+        beta_hat_arrays = np.concatenate(beta_hat_arrays, axis = 0)
+        # importance_array = np.abs(beta_hat_arrays)
+        importance_array = beta_hat_arrays
+        importance_pd = pd.DataFrame(importance_array, columns = self.beta_names)
+        return importance_pd

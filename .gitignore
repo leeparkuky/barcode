@@ -161,3 +161,4 @@ cython_debug/
 #
 *.parquet/
 importance_score/*.csv
+permutation_score/*.csv
