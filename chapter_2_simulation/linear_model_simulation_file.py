@@ -45,7 +45,7 @@ def gen_y(df):
 
 @profile
 def pipeline(p, n):
-    df = pd.read_csv('sample_dataset.csv')
+    df = pd.read_csv('sample_dataset_small.csv')
     X = df.loc[:, df.columns.str.contains('x')].to_numpy()
     y = df.y.to_numpy().reshape(-1,1)
     reg = LinearRegression()
