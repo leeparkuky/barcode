@@ -1,0 +1,32 @@
+Filename: /Users/gradcheckout/Lee/barcode/chapter_2_simulation/lasso_memory_simulation_file.py
+
+Line #    Mem usage    Increment  Occurrences   Line Contents
+=============================================================
+   115    350.3 MiB    350.3 MiB           1   @profile
+   116                                         def pipeline(p, n):
+   117    354.5 MiB      4.1 MiB           1       input_dataset = gen_barcode_dataloader(p, n)
+   118    354.9 MiB      0.5 MiB           1       input_dataset = input_dataset.train_test_split(test_size = .2)
+   119                                         
+   120    354.9 MiB      0.0 MiB           1       train_dataloader = DataLoader(input_dataset['train'], batch_size=126, shuffle=True)
+   121    354.9 MiB      0.0 MiB           1       test_dataloader = DataLoader(input_dataset['test'], batch_size=126, shuffle=True)
+   122                                         
+   123                                         
+   124    356.4 MiB      1.4 MiB           1       lasso = Lasso_Barcode(p)
+   125    372.4 MiB     16.0 MiB           1       optimizer = optim.Adam(lasso.parameters(), lr=0.001)
+   126                                         
+   127    372.4 MiB      0.0 MiB           1       num_epochs = 10
+   128    372.4 MiB      0.0 MiB           1       val_loss = np.inf
+   129    378.8 MiB      0.0 MiB          11       for epoch in range(num_epochs):
+   130                                                 # Forward pass
+   131    378.8 MiB      6.4 MiB          10           lasso, optimizer = train(train_dataloader, lasso, optimizer)
+   132                                         
+   133    378.8 MiB      0.0 MiB          10           if epoch % 10 == 0:
+   134    378.5 MiB      0.0 MiB           1               current_val_loss = evaluate(test_dataloader, lasso)
+   135    378.5 MiB      0.0 MiB           1               if val_loss > current_val_loss:
+   136    378.5 MiB      0.0 MiB           1                   val_loss = current_val_loss
+   137                                                     else:
+   138                                                         break
+   139                                                         
+   140    378.8 MiB      0.0 MiB           1       return lasso
+
+
