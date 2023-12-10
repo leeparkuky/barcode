@@ -28,10 +28,12 @@ def gen_subsample( sample_size , error_scale, ddf):
 
 #%% dask parameter generator
 import os
-def single_simulation(sample_size, iter, error_scale, ddf, num_interactions):
+def single_simulation(sample_size, iter, error_scale, ddf, num_interactions, start_number = None):
     for i in range(iter):
         subsample = gen_subsample(sample_size, error_scale, ddf)
         gen = dask_parameter_generator(subsample)
+        if start_number:
+            i += start_number
         gen.gen_importance_score(max_variables = 7, filename= f"importance_score_numInteractions_{num_interactions}_iter_{i}_n_{sample_size}_error_{error_scale}.csv", dir = os.path.join(os.getcwd(), 'importance_score'))
 
 

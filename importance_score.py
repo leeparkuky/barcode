@@ -296,6 +296,7 @@ class dask_parameter_generator():
             pass
         else:
             L_inv = sparse_inv(self.L)
+            L_inv.data = np.round(L_inv.data,0)
             self._L_inv = L_inv.astype(np.int8)
         return self._L_inv
 
